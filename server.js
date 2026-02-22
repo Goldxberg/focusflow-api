@@ -1,10 +1,30 @@
 const express = require('express');
 const cors = require('cors');
+const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
 app.use(cors());
 app.use(express.json());
+
+// ─── AWS Bedrock (Llama 3.3 70B AI) ───
+const bedrock = new BedrockRuntimeClient({
+  region: process.env.AWS_REGION || 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  }
+});
+
+async function askAI(prompt, maxTokens = 500) {
+  const command = new ConverseCommand({
+    modelId: 'us.meta.llama3-3-70b-instruct-v1:0',
+    messages: [{ role: 'user', content: [{ text: prompt }] }],
+    inferenceConfig: { maxTokens, temperature: 0.7 }
+  });
+  const response = await bedrock.send(command);
+  return response.output.message.content[0].text;
+}
 
 // ─── In-Memory Data Store ───
 let tasks = [];
@@ -229,20 +249,90 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ deleted: true });
 });
 
-// ─── AI Task Breakdown ───
-app.post('/api/ai/breakdown', (req, res) => {
+// ─── AI Task Breakdown (Real Claude AI!) ───
+app.post('/api/ai/breakdown', async (req, res) => {
   const { task } = req.body;
   if (!task) return res.status(400).json({ error: 'Task description required' });
 
-  const steps = breakdownTask(task);
-  const totalMins = steps.reduce((sum, s) => sum + s.mins, 0);
+  try {
+    const prompt = `You are an ADHD focus coach. Break this task into 5-7 tiny, concrete steps for someone with ADHD.
 
-  res.json({
-    originalTask: task,
-    steps,
-    totalMins,
-    message: `Broken into ${steps.length} tiny steps (~${totalMins} min total). You got this! 💪`
-  });
+Task: "${task}"
+
+Rules:
+- Each step should be TINY (2-15 minutes max)
+- Be specific and actionable (not vague)
+- Include time estimates in minutes
+- Add emoji encouragement
+- Start easy to build momentum
+- Include a break step
+
+Return ONLY valid JSON in this format (no other text):
+[{"text": "step description", "mins": 5}, ...]`;
+
+    const aiResponse = await askAI(prompt);
+    const steps = JSON.parse(aiResponse.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+    const totalMins = steps.reduce((sum, s) => sum + s.mins, 0);
+
+    res.json({
+      originalTask: task,
+      steps,
+      totalMins,
+      poweredBy: 'Claude AI (AWS Bedrock)',
+      message: `AI broke this into ${steps.length} tiny steps (~${totalMins} min). You got this! 💪`
+    });
+  } catch (err) {
+    // Fallback to pattern-based if AI fails
+    const steps = breakdownTask(task);
+    const totalMins = steps.reduce((sum, s) => sum + s.mins, 0);
+    res.json({
+      originalTask: task,
+      steps,
+      totalMins,
+      poweredBy: 'pattern-based (AI unavailable)',
+      message: `Broken into ${steps.length} tiny steps (~${totalMins} min total). You got this! 💪`
+    });
+  }
+});
+
+// ─── AI Chat Coach ───
+app.post('/api/ai/coach', async (req, res) => {
+  const { message, energy, completedToday: doneCount } = req.body;
+  if (!message) return res.status(400).json({ error: 'Message required' });
+
+  try {
+    const context = `You are an ADHD focus coach — warm, practical, brief.
+The user's energy is: ${energy || 'unknown'}. They completed ${doneCount || 0} tasks today.
+Current streak: ${streak} days. Level: ${Math.floor(totalXP / 100) + 1}.
+
+Respond in 2-3 short sentences max. Be encouraging but practical. Use 1-2 emoji.`;
+
+    const response = await askAI(`${context}\n\nUser: ${message}`, 200);
+    res.json({ response, poweredBy: 'Llama 3.3 70B (AWS Bedrock)' });
+  } catch (err) {
+    res.json({ response: "Keep going — one small step at a time! 💪", poweredBy: 'fallback' });
+  }
+});
+
+// ─── AI Daily Summary ───
+app.get('/api/ai/summary', async (req, res) => {
+  updateStreak();
+  try {
+    const wins = completedToday.map(t => t.name).join(', ') || 'none yet';
+    const prompt = `Write a brief, encouraging daily summary for someone with ADHD.
+Tasks completed today: ${wins}
+Streak: ${streak} days
+Level: ${Math.floor(totalXP / 100) + 1}
+Total XP: ${totalXP}
+Pending tasks: ${tasks.length}
+
+Write 3 short sentences: what they accomplished, encouragement, one suggestion for tomorrow. Use emoji.`;
+
+    const summary = await askAI(prompt, 200);
+    res.json({ summary, stats: { completedToday: completedToday.length, streak, totalXP }, poweredBy: 'Llama 3.3 70B (AWS Bedrock)' });
+  } catch (err) {
+    res.json({ summary: `You completed ${completedToday.length} tasks. Keep the momentum! 🔥`, poweredBy: 'fallback' });
+  }
 });
 
 // ─── Energy Check-in ───
