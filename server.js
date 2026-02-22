@@ -72,6 +72,57 @@ async function generateImage(prompt, options = {}) {
   };
 }
 
+function escapeXml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function generateFallbackImage(prompt, options = {}) {
+  const width = Math.min(Math.max(Number(options.width) || 1024, 256), 2048);
+  const height = Math.min(Math.max(Number(options.height) || 1024, 256), 2048);
+  const safePrompt = escapeXml(prompt).slice(0, 180);
+  const ts = new Date().toISOString();
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b1020" />
+      <stop offset="50%" stop-color="#1d3557" />
+      <stop offset="100%" stop-color="#2a9d8f" />
+    </linearGradient>
+    <linearGradient id="line" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#93c5fd" />
+      <stop offset="100%" stop-color="#86efac" />
+    </linearGradient>
+  </defs>
+  <rect width="${width}" height="${height}" fill="url(#bg)"/>
+  <circle cx="${Math.round(width * 0.8)}" cy="${Math.round(height * 0.22)}" r="${Math.round(width * 0.15)}" fill="#ffffff22"/>
+  <circle cx="${Math.round(width * 0.15)}" cy="${Math.round(height * 0.82)}" r="${Math.round(width * 0.22)}" fill="#10b98122"/>
+  <rect x="${Math.round(width * 0.08)}" y="${Math.round(height * 0.12)}" width="${Math.round(width * 0.84)}" height="${Math.round(height * 0.76)}" rx="28" fill="#00000044" stroke="url(#line)" stroke-width="2"/>
+  <text x="${Math.round(width * 0.12)}" y="${Math.round(height * 0.28)}" fill="#dbeafe" font-size="${Math.max(24, Math.round(width * 0.03))}" font-family="Arial, Helvetica, sans-serif" font-weight="700">Prompt Image (Fallback)</text>
+  <foreignObject x="${Math.round(width * 0.12)}" y="${Math.round(height * 0.34)}" width="${Math.round(width * 0.76)}" height="${Math.round(height * 0.34)}">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="color:#f8fafc;font-family:Arial,Helvetica,sans-serif;font-size:${Math.max(20, Math.round(width * 0.022))}px;line-height:1.35;word-break:break-word;">
+      ${safePrompt}
+    </div>
+  </foreignObject>
+  <text x="${Math.round(width * 0.12)}" y="${Math.round(height * 0.78)}" fill="#93c5fd" font-size="${Math.max(14, Math.round(width * 0.015))}" font-family="Arial, Helvetica, sans-serif">Generated locally at ${escapeXml(ts)}</text>
+</svg>`.trim();
+
+  return {
+    imageBase64: Buffer.from(svg).toString('base64'),
+    width,
+    height,
+    seed: 0,
+    modelId: 'local-svg-fallback',
+    mimeType: 'image/svg+xml'
+  };
+}
+
 // ─── In-Memory Data Store ───
 let tasks = [];
 let completedToday = [];
@@ -362,13 +413,13 @@ app.post('/api/ai/image', async (req, res) => {
       poweredBy: `AWS Bedrock (${image.modelId})`
     });
   } catch (err) {
-    const denied = err?.name === 'AccessDeniedException';
     console.error('[ai-image-error]', err?.name, err?.message);
-    return res.status(500).json({
-      error: denied
-        ? 'Bedrock image model access denied. Allow this model in Bedrock + IAM policy.'
-        : (err?.message || 'Image generation failed'),
-      code: err?.name || 'BedrockImageError'
+    const fallback = generateFallbackImage(prompt, { width, height });
+    return res.json({
+      ...fallback,
+      imageDataUrl: `data:${fallback.mimeType};base64,${fallback.imageBase64}`,
+      poweredBy: 'Local SVG Fallback',
+      warning: 'Bedrock image model unavailable. Served local generated fallback.'
     });
   }
 });
