@@ -363,7 +363,8 @@ app.post('/api/ai/image', async (req, res) => {
     });
   } catch (err) {
     const denied = err?.name === 'AccessDeniedException';
-    return res.status(502).json({
+    console.error('[ai-image-error]', err?.name, err?.message);
+    return res.status(500).json({
       error: denied
         ? 'Bedrock image model access denied. Allow this model in Bedrock + IAM policy.'
         : (err?.message || 'Image generation failed'),
