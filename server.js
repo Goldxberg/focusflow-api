@@ -1,8 +1,9 @@
 const express = require('express');
 const cors = require('cors');
-const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { BedrockRuntimeClient, ConverseCommand, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
 const app = express();
 const PORT = process.env.PORT || 8080;
+const IMAGE_MODEL_ID = process.env.BEDROCK_IMAGE_MODEL || 'amazon.nova-canvas-v1:0';
 
 app.use(cors());
 app.use(express.json());
@@ -24,6 +25,51 @@ async function askAI(prompt, maxTokens = 500) {
   });
   const response = await bedrock.send(command);
   return response.output.message.content[0].text;
+}
+
+async function generateImage(prompt, options = {}) {
+  const width = Math.min(Math.max(Number(options.width) || 1024, 256), 2048);
+  const height = Math.min(Math.max(Number(options.height) || 1024, 256), 2048);
+  const seed = Number.isInteger(Number(options.seed)) ? Number(options.seed) : Math.floor(Math.random() * 1000000);
+
+  const payload = {
+    taskType: 'TEXT_IMAGE',
+    textToImageParams: {
+      text: prompt,
+      negativeText: typeof options.negativePrompt === 'string' ? options.negativePrompt : ''
+    },
+    imageGenerationConfig: {
+      width,
+      height,
+      quality: 'standard',
+      cfgScale: 8,
+      seed,
+      numberOfImages: 1
+    }
+  };
+
+  const command = new InvokeModelCommand({
+    modelId: IMAGE_MODEL_ID,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: JSON.stringify(payload)
+  });
+
+  const response = await bedrock.send(command);
+  const bodyJson = JSON.parse(new TextDecoder().decode(response.body));
+  const imageBase64 = bodyJson?.images?.[0];
+
+  if (!imageBase64) {
+    throw new Error('Bedrock returned no image data');
+  }
+
+  return {
+    imageBase64,
+    width,
+    height,
+    seed,
+    modelId: IMAGE_MODEL_ID
+  };
 }
 
 // ─── In-Memory Data Store ───
@@ -291,6 +337,37 @@ Return ONLY valid JSON in this format (no other text):
       totalMins,
       poweredBy: 'pattern-based (AI unavailable)',
       message: `Broken into ${steps.length} tiny steps (~${totalMins} min total). You got this! 💪`
+    });
+  }
+});
+
+// ─── AI Image Generator (AWS Bedrock) ───
+app.post('/api/ai/image', async (req, res) => {
+  const { prompt, width, height, seed, negativePrompt } = req.body || {};
+
+  if (!prompt || typeof prompt !== 'string') {
+    return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  if (prompt.length > 700) {
+    return res.status(400).json({ error: 'Prompt too long (max 700 chars)' });
+  }
+
+  try {
+    const image = await generateImage(prompt, { width, height, seed, negativePrompt });
+    res.json({
+      ...image,
+      mimeType: 'image/png',
+      imageDataUrl: `data:image/png;base64,${image.imageBase64}`,
+      poweredBy: `AWS Bedrock (${image.modelId})`
+    });
+  } catch (err) {
+    const denied = err?.name === 'AccessDeniedException';
+    return res.status(502).json({
+      error: denied
+        ? 'Bedrock image model access denied. Allow this model in Bedrock + IAM policy.'
+        : (err?.message || 'Image generation failed'),
+      code: err?.name || 'BedrockImageError'
     });
   }
 });
